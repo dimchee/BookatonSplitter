@@ -55,7 +55,7 @@ view { percentage, images } =
         [ Html.Attributes.style "display" "flex"
         , Html.Attributes.style "flex-direction" "column"
         ]
-        [ case Images.getImage 0 images of
+        [ case Images.getImageUrl 0 images of
             Just url ->
                 Html.img
                 [ Html.Attributes.src url
