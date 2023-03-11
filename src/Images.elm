@@ -1,83 +1,82 @@
 module Images exposing (..)
 
-import Dict exposing (Dict)
 import File
 import File.Download
 import File.Select
+import Git
 import Html exposing (Html)
 import Html.Attributes
 import Html.Events
-import Http
 import Json.Decode
 import Json.Encode
 import List.Extra
+import PartsJson
 import Task
 
 
-type FileType
-    = Dir { parent : File, files : Maybe (List File) }
-    | Plain { parent : File }
-    | Root { files : Maybe (List File) }
+type alias Percentage =
+    Int
 
 
-type alias File =
-    -- TODO Add sha (changes init, so it will need to parse resulting url and sha)
-    -- TODO Maybe dont save url at all (and generate it on fly from sha) so it is less error prone
-    { name : String
-    , url : String
-    , ft : FileType
+type alias Image =
+    { split : Maybe Percentage, url : String }
+
+
+type alias Loadable =
+    { folder : Git.Object
+    , images : List Image -- sorted list of images
     }
 
 
-pathToFile : File -> String
-pathToFile { name, ft } =
-    case ft of
-        Dir { parent } ->
-            pathToFile parent ++ "/" ++ name
-
-        Plain { parent } ->
-            pathToFile parent ++ "/" ++ name
-
-        Root _ ->
-            ""
-
-
-fileRepo : File -> String
-fileRepo { url } =
-    String.split "/" url |> List.drop 4 |> List.take 2 |> String.join "/"
-
-
-listDir : File -> Maybe (List File)
-listDir file =
-    case file.ft of
-        Dir { files } ->
-            files
-
-        Root { files } ->
-            files
-
-        Plain _ ->
-            Nothing
-
-
 type alias Model =
-    { selected : File
+    { selected : Maybe Loadable
     , selecting : Bool
     }
 
 
 getImageUrl : Int -> Model -> Maybe String
 getImageUrl ind { selected } =
-    listDir selected
-        |> Maybe.map (List.filter (\{ name } -> String.endsWith ".jpg" name || String.endsWith ".png" name))
-        |> Maybe.map (List.sortBy .name)
-        |> Maybe.andThen (List.Extra.getAt ind)
-        |> Maybe.map (\x -> pathToFile selected ++ "/" ++ x.name)
-        |> Maybe.map (\x -> "https://raw.githubusercontent.com/" ++ fileRepo selected ++ "/609906c5de7c5c201f8263f620487e4330a5d188/" ++ x)
+    selected |> Maybe.andThen (.images >> List.Extra.getAt ind) >> Maybe.map .url
+
+
+clampIndex : Model -> Int -> Int
+clampIndex { selected } ind =
+    selected
+        |> Maybe.map (.images >> List.length)
+        |> Maybe.withDefault 0
+        |> (\len -> clamp 0 (len-1) ind)
+
+
+{-| Returns in increasing order of Index
+-}
+getModifications : Model -> List ( Int, Percentage )
+getModifications { selected } =
+    selected
+        |> Maybe.map .images
+        |> Maybe.withDefault []
+        |> List.indexedMap (\ind { split } -> ( ind, split ))
+        |> List.filterMap (\( ind, split ) -> Maybe.map (\x -> ( ind, x )) split)
+
+
+modify : ( Int, Percentage ) -> Model -> Model
+modify ( ind, split ) model =
+    { model
+        | selected =
+            Maybe.map
+                (\selected ->
+                    { selected
+                        | images =
+                            List.Extra.updateAt ind
+                                (\img -> { img | split = Just split })
+                                selected.images
+                    }
+                )
+                model.selected
+    }
 
 
 type Msg
-    = GotDirListing (Maybe (List File))
+    = GotDirListing (Maybe (List Git.Object))
     | PathChanged String
     | RepoChanged String
     | New
@@ -88,105 +87,98 @@ type Msg
     | GotFile String
 
 
-rootFile : String -> File
+rootFile : String -> Loadable
 rootFile repo =
-    { name = ""
-    , url = "https://api.github.com/repos/" ++ repo ++ "/git/trees/master"
-    , ft = Root { files = Nothing }
+    { folder =
+        { name = ""
+        , url = "https://api.github.com/repos/" ++ repo ++ "/git/trees/master"
+        , ft = Git.Root { files = Nothing }
+        }
+    , images = []
     }
 
 
-requestDirListing : File -> Cmd Msg
-requestDirListing ({ url } as file) =
-    Http.get
-        { url = url
-        , expect =
-            Json.Decode.field "url" Json.Decode.string
-                |> Json.Decode.andThen
-                    (\newUrl ->
-                        Json.Decode.field "tree"
-                            (Json.Decode.list <|
-                                Json.Decode.map3
-                                    (\name link t ->
-                                        File name link <|
-                                            if t == "tree" then
-                                                Dir { parent = { file | url = newUrl }, files = Nothing }
-
-                                            else
-                                                Plain { parent = { file | url = newUrl } }
-                                    )
-                                    (Json.Decode.field "path" Json.Decode.string)
-                                    (Json.Decode.field "url" Json.Decode.string)
-                                    (Json.Decode.field "type" Json.Decode.string)
-                            )
-                    )
-                |> Http.expectJson
-                    (Result.toMaybe >> GotDirListing)
-        }
+requestDirListing : Model -> ( Model, Cmd Msg )
+requestDirListing ({ selected } as model) =
+    ( model
+    , Maybe.map (.folder >> Git.requestDirListing GotDirListing) selected
+        |> Maybe.withDefault Cmd.none
+    )
 
 
-addCmd : (Model -> Cmd Msg) -> Model -> ( Model, Cmd Msg )
-addCmd f model =
-    ( model, f model )
+notListed : Git.Object -> Loadable
+notListed folder =
+    { folder = folder, images = [] }
+
+
+initJson : ( Model, Cmd Msg )
+initJson =
+    ( { selected =
+            Json.Decode.decodeString loadableDecoder PartsJson.json
+                |> Result.toMaybe
+      , selecting = False
+      }
+    , Cmd.none
+    )
 
 
 init : String -> ( Model, Cmd Msg )
 init repo =
-    { selected = rootFile repo
+    { selected = Just <| rootFile repo
     , selecting = False
     }
-        |> addCmd (\{ selected } -> requestDirListing selected)
+        |> requestDirListing
 
 
-addFiles : Maybe (List File) -> File -> File
-addFiles files file =
-    case file.ft of
-        Dir x ->
-            { file | ft = Dir { x | files = files } }
-
-        Root x ->
-            { file | ft = Root { x | files = files } }
-
-        Plain _ ->
-            file
+refreshLoadable : Maybe (List Git.Object) -> Loadable -> Loadable
+refreshLoadable files { folder } =
+    { folder = Git.refreshFiles files folder
+    , images =
+        files
+            |> Maybe.withDefault []
+            |> List.filter
+                (\{ name } ->
+                    String.endsWith ".jpg" name || String.endsWith ".png" name
+                )
+            |> List.sortBy .name
+            |> List.map Git.toRawLink
+            |> List.map (Image Nothing)
+    }
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
         RepoChanged repo ->
-            { model | selected = rootFile repo }
-                |> addCmd (\{ selected } -> requestDirListing selected)
+            { model | selected = Just <| rootFile repo }
+                |> requestDirListing
 
         GotDirListing files ->
-            ( { model | selected = addFiles files model.selected }
+            ( { model
+                | selected = Maybe.map (refreshLoadable files) model.selected
+              }
             , Cmd.none
             )
 
         PathChanged name ->
             if name == ".." then
-                { model
-                    | selected =
-                        case model.selected.ft of
-                            Plain { parent } ->
-                                parent
-
-                            Dir { parent } ->
-                                parent
-
-                            Root _ ->
-                                model.selected
-                }
-                    |> addCmd (\{ selected } -> requestDirListing selected)
+                model.selected
+                    |> Maybe.map .folder
+                    |> Maybe.map (\x -> Git.getParent x |> Maybe.withDefault x)
+                    |> Maybe.map notListed
+                    |> Maybe.map (\l -> { model | selected = Just l } |> requestDirListing)
+                    -- Don't refresh without a reason
+                    |> Maybe.withDefault ( model, Cmd.none )
 
             else
-                case Maybe.andThen (List.Extra.find (\file -> name == file.name)) <| listDir model.selected of
-                    Just file ->
-                        { model | selected = file }
-                            |> addCmd (\{ selected } -> requestDirListing selected)
-
-                    Nothing ->
-                        ( model, Cmd.none )
+                model.selected
+                    |> Maybe.map .folder
+                    |> Maybe.andThen Git.listDir
+                    |> Maybe.andThen (List.Extra.find (\file -> name == file.name))
+                    |> Maybe.map notListed
+                    |> Maybe.map (\l -> { model | selected = Just l } |> requestDirListing)
+                    -- Don't refresh without a reason
+                    |> Maybe.withDefault ( model, Cmd.none )
 
         New ->
             ( { model | selecting = True }, Cmd.none )
@@ -201,92 +193,57 @@ update msg model =
             ( model, Task.perform GotFile (File.toString file) )
 
         Save ->
-            ( model, File.Download.string "parts.json" "application/json" <| Json.Encode.encode 4 <| fileEncoder model.selected )
+            ( model
+            , case model.selected of
+                Just selected ->
+                    loadableEncoder selected
+                        |> Json.Encode.encode 4
+                        |> File.Download.string "parts.json" "application/json"
+
+                Nothing ->
+                    Cmd.none
+            )
 
         GotFile content ->
             -- TODO Make decoding error visible in UI
             -- ( Json.Decode.decodeString modelDecoder content |> Result.toMaybe |> Maybe.withDefault model
             ( { model
                 | selected =
-                    Json.Decode.decodeString fileDecoder content
+                    Json.Decode.decodeString loadableDecoder content
                         |> Result.toMaybe
-                        |> Maybe.withDefault model.selected
               }
             , Cmd.none
             )
 
 
-fileEncoder : File -> Json.Encode.Value
-fileEncoder file =
+loadableEncoder : Loadable -> Json.Encode.Value
+loadableEncoder { folder, images } =
     Json.Encode.object
-        [ ( "name", Json.Encode.string file.name )
-        , ( "url", Json.Encode.string file.url )
-        , ( "ft"
-          , Json.Encode.object <|
-                case file.ft of
-                    Dir { parent, files } ->
-                        [ ( "tag", Json.Encode.string "dir" )
-                        , ( "parent", fileEncoder parent )
-                        , ( "files"
-                          , files
-                                |> Maybe.map (Json.Encode.list fileEncoder)
-                                |> Maybe.withDefault Json.Encode.null
-                          )
-                        ]
-
-                    Root { files } ->
-                        [ ( "tag", Json.Encode.string "root" )
-                        , ( "files"
-                          , Maybe.map (Json.Encode.list fileEncoder) files
-                                |> Maybe.withDefault Json.Encode.null
-                          )
-                        ]
-
-                    Plain { parent } ->
-                        [ ( "tag", Json.Encode.string "plain" )
-                        , ( "parent", fileEncoder parent )
-                        ]
-          )
+        [ ( "folder", Git.objectEncoder folder )
+        , ( "images", Json.Encode.list imageEncoder images )
         ]
 
 
-fileDecoder : Json.Decode.Decoder File
-fileDecoder =
-    Json.Decode.map3 File
-        (Json.Decode.field "name" Json.Decode.string)
+imageEncoder : Image -> Json.Encode.Value
+imageEncoder { split, url } =
+    Json.Encode.object
+        [ ( "split", split |> Maybe.map Json.Encode.int |> Maybe.withDefault Json.Encode.null )
+        , ( "url", Json.Encode.string url )
+        ]
+
+
+loadableDecoder : Json.Decode.Decoder Loadable
+loadableDecoder =
+    Json.Decode.map2 Loadable
+        (Json.Decode.field "folder" Git.objectDecoder)
+        (Json.Decode.field "images" <| Json.Decode.list imageDecoder)
+
+
+imageDecoder : Json.Decode.Decoder Image
+imageDecoder =
+    Json.Decode.map2 Image
+        (Json.Decode.field "split" <| Json.Decode.nullable Json.Decode.int)
         (Json.Decode.field "url" Json.Decode.string)
-        (Json.Decode.field "tag" Json.Decode.string
-            |> Json.Decode.andThen
-                (\tag ->
-                    case tag of
-                        "dir" ->
-                            Json.Decode.map2 (\parent files -> Dir { parent = parent, files = files })
-                                (Json.Decode.field "parent" <| Json.Decode.lazy (\_ -> fileDecoder))
-                                (Json.Decode.field "files" <|
-                                    Json.Decode.lazy
-                                        (\_ ->
-                                            Json.Decode.nullable <| Json.Decode.list fileDecoder
-                                        )
-                                )
-
-                        "root" ->
-                            Json.Decode.map (\files -> Root { files = files })
-                                (Json.Decode.field "files" <|
-                                    Json.Decode.lazy
-                                        (\_ ->
-                                            Json.Decode.nullable <| Json.Decode.list fileDecoder
-                                        )
-                                )
-
-                        "plain" ->
-                            Json.Decode.map (\parent -> Plain { parent = parent })
-                                (Json.Decode.field "parent" <| Json.Decode.lazy (\_ -> fileDecoder))
-
-                        _ ->
-                            Json.Decode.fail "invalid `ft` tag"
-                )
-            |> Json.Decode.field "ft"
-        )
 
 
 view : Model -> Html Msg
@@ -311,26 +268,15 @@ viewSelectDir { selected } =
         , Html.div []
             [ List.map
                 (Html.option [] << List.singleton << Html.text)
-                (listDir selected
-                    |> Maybe.withDefault []
-                    |> List.filterMap
-                        (\{ ft, name } ->
-                            case ft of
-                                Plain _ ->
-                                    Nothing
-
-                                _ ->
-                                    Just name
-                        )
-                )
+                (selected |> Maybe.map (.folder >> Git.subDirs) |> Maybe.withDefault [] |> List.map .name)
                 |> List.append [ Html.option [] [ Html.text "." ], Html.option [] [ Html.text ".." ] ]
                 |> Html.select [ Html.Events.onInput PathChanged ]
             ]
         , Html.div []
             [ Html.text <|
                 "Selected Directory: "
-                    ++ fileRepo selected
-                    ++ pathToFile selected
+                    ++ (Maybe.map (.folder >> Git.fileRepo) selected |> Maybe.withDefault "noRepo")
+                    ++ (Maybe.map (.folder >> Git.pathToFile) selected |> Maybe.withDefault "noPath")
             ]
         , Html.button [ Html.Events.onClick Submit ] [ Html.text "Submit" ]
         ]
