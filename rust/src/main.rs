@@ -5,12 +5,13 @@ struct State {
 
 impl State {
     fn new() -> tide::Result<Self> {
+
+        let mut dir = std::fs::read_dir("../../Scan")?
+                .filter_map(|res| res.ok())
+                .collect::<Vec<_>>();
+        dir.sort_by_key(|x| x.file_name());
         Ok(Self {
-            dir: std::sync::Arc::new(
-                std::fs::read_dir("../../Scan")?
-                    .filter_map(|res| res.ok())
-                    .collect::<Vec<_>>(),
-            ),
+            dir: std::sync::Arc::new(dir),
         })
     }
 }

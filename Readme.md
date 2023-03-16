@@ -9,4 +9,5 @@
 - [ ] [Responsive image layout](https://css-tricks.com/adaptive-photo-layout-with-flexbox/)
 - [ ] Make `Flash effect` when image is cut (with CSS)
 - [*] Add server that serves images by index
-- [ ] Add buttons for `next/previous page`, and `split between pages`
+- [*] Add buttons for `next/previous page`, and `split between pages`
+- [ ] Save modifications
