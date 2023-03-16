@@ -1,0 +1,5 @@
+#!/bin/sh
+(cd elm && elm-live src/Main.elm --no-server -- --debug 2> /dev/null > /dev/null)&
+cd rust && cargo build
+(chromium http://localhost:8888 2> /dev/null)&
+cargo watch -x run
