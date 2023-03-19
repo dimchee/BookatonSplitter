@@ -55,6 +55,7 @@ type Msg
     | Saved (Result Http.Error String)
     | Load
     | Loaded (Result Http.Error (Dict Img Split))
+    | ToPDF
 
 
 gradient : Percentage -> String
@@ -242,6 +243,7 @@ view ({ pageIncStep, serverMsg } as model) =
             , Html.div []
                 [ navButton "Save" Save
                 , navButton "Load" Load
+                , navButton "PDF" ToPDF
                 ]
             , Html.text <| Maybe.withDefault "No messages from server" serverMsg
             ]
@@ -320,6 +322,14 @@ update msg model =
                         )
                     )
                 |> Maybe.withDefault ( { model | serverMsg = Just "Could not load :P" }, Cmd.none )
+
+        ToPDF ->
+            ( model
+            , Http.get
+                { url = "topdf"
+                , expect = Http.expectString Saved
+                }
+            )
 
 
 toMods : Dict String Split -> Dict Img Split
