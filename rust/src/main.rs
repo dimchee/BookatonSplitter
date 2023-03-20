@@ -17,6 +17,34 @@ impl State {
     }
 }
 
+struct Pages {
+    from: Option<usize>,
+    to: Option<usize>,
+}
+
+impl Pages {
+    fn new(from: usize) -> Pages {
+        Pages {
+            from: Some(from),
+            to: None,
+        }
+    }
+    fn to(&mut self, to: usize) -> &mut Pages {
+        self.to = Some(to);
+        self
+    }
+}
+
+impl std::fmt::Display for Pages {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        if let (Some(from), Some(to)) = (self.from, self.to) {
+            write!(f, "{:0>4}-{:0>4}", from, to)
+        } else {
+            Err(std::fmt::Error::default())
+        }
+    }
+}
+
 async fn images(req: tide::Request<State>) -> tide::Result<tide::Response> {
     let n: usize = req.param("n")?.parse().unwrap_or(0);
     let state = req.state();
@@ -78,7 +106,7 @@ fn split_image(percentage: f64, file: &PathBuf) -> (PathBuf, PathBuf) {
         .expect(&format!("Failed to split file-start: {}", start.display()));
     std::process::Command::new("convert")
         .arg(file)
-        .args([ "-gravity", "South", "-crop" ])
+        .args(["-gravity", "South", "-crop"])
         .arg("0x".to_owned() + &(102.0 - percentage).to_string() + "%+0")
         .arg(end.clone())
         .output()
@@ -90,45 +118,41 @@ fn split_image(percentage: f64, file: &PathBuf) -> (PathBuf, PathBuf) {
 }
 
 fn to_pdfs(state: &State, mods: &Modifications) {
-    state
+    let mut groups = state
         .dir
         .iter()
         .enumerate()
-        .fold(
-            vec![("1".to_string(), vec![])],
-            |mut groups, (ind, file)| {
-                match mods.get(&ind) {
-                    None => groups.last_mut().unwrap().1.push(file.path()),
-                    Some(split) => match split {
-                        Split::Before => {
-                            groups.last_mut().unwrap().0 += &("-".to_string() + &ind.to_string());
-                            groups.push(((ind + 1).to_string(), vec![file.path()]))
-                        }
-                        Split::After => {
-                            groups.last_mut().unwrap().1.push(file.path());
-                            groups.last_mut().unwrap().0 +=
-                                &("-".to_string() + &(ind + 1).to_string());
-                            groups.push(((ind + 1).to_string(), vec![]))
-                        }
-                        Split::Middle(p) => {
-                            let (start, end) = split_image(*p, &file.path());
-                            groups.last_mut().unwrap().1.push(start);
-                            groups.last_mut().unwrap().0 +=
-                                &("-".to_string() + &(ind + 1).to_string());
-                            groups.push(((ind + 1).to_string(), vec![end]))
-                        }
-                    },
-                }
-                groups
-            },
-        )
-        .iter()
+        .fold(vec![(Pages::new(1), vec![])], |mut groups, (ind, file)| {
+            match mods.get(&ind) {
+                None => groups.last_mut().unwrap().1.push(file.path()),
+                Some(split) => match split {
+                    Split::Before => {
+                        groups.last_mut().unwrap().0.to(ind);
+                        groups.push((Pages::new(ind + 1), vec![file.path()]))
+                    }
+                    Split::After => {
+                        groups.last_mut().unwrap().1.push(file.path());
+                        groups.last_mut().unwrap().0.to(ind + 1);
+                        groups.push((Pages::new(ind + 1), vec![]))
+                    }
+                    Split::Middle(p) => {
+                        let (start, end) = split_image(*p, &file.path());
+                        groups.last_mut().unwrap().1.push(start);
+                        groups.last_mut().unwrap().0.to(ind + 1);
+                        groups.push((Pages::new(ind + 1), vec![end]))
+                    }
+                },
+            }
+            groups
+        });
+    groups.last_mut().unwrap().0.to(state.dir.len());
+    groups.iter()
         .for_each(|(name, group)| {
             if group.len() < 100 {
                 println!("making pdf from group {}", name);
                 std::process::Command::new("convert")
                     .args(group)
-                    .arg("../../Parts/".to_owned() + name + ".pdf")
+                    .arg("../../Parts/".to_owned() + &name.to_string() + ".pdf")
                     .output()
                     .expect(&format!("Failed to merge pages {}", name));
             } else {
