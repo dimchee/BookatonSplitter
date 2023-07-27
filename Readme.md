@@ -1,4 +1,4 @@
-# Splitter - Quick tool for splitting images, made for Bookaton
+# Splitter - Quick tool for splitting images, made for [Bookaton](https://github.com/dimchee/Bookaton)
 
 - Use [wallpapers](https://github.com/DenverCoder1/minimalistic-wallpaper-collection) as image test repo
 
